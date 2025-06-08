@@ -46,291 +46,260 @@ using ROCAnalysis
 # ╔═╡ 1bacbc71-5efa-4f2b-810c-4fb135976922
 using Random
 
+# ╔═╡ 004bda84-19ad-4b72-963e-d787359ae74d
+using Flux: logitcrossentropy, @epochs, params, Optimise
+
 # ╔═╡ 4d64f427-ba8d-4cb8-ab4e-ca23e7a2c752
 #Defining the paths and the parameter of the images
 
 # ╔═╡ c4ec3a76-b319-444d-afde-730417cc920a
 begin
-    # Assuming your data is in a "rice_images" folder with subfolders for each class
-    data_path = "C:/Users/paulu/Documents/Julia_Ass_3/rice_image_dataset" 
-    classes = ["Arborio", "Basmati", "Ipsala", "Jasmine", "Karacadag"]
-    num_classes = length(classes)
-    image_size = (227, 227)  # AlexNet input size
-    batch_size = 16
-    validation_split = 0.2
-    random_seed = 42
-	Random.seed!(random_seed)
-end
 
-# ╔═╡ b2b461c8-8bda-4c9a-a063-54935c7e0db9
-begin
-    function load_image(path)
-        img = load(path)
-        img = imresize(img, image_size)
-        img = channelview(img)
-        img = Float32.(img)
-        img = permutedims(img, (2, 3, 1))  # HWC format
-        return (img .- minimum(img)) ./ (maximum(img) - minimum(img))
-    end
-    
-    X = []
-    Y = []
-    
-    for (class_idx, class_name) in enumerate(classes)
-        class_path = joinpath(data_path, class_name)
-        for img_file in readdir(class_path)
-            if endswith(lowercase(img_file), ".jpg") || endswith(lowercase(img_file), ".png")
-                push!(X, load_image(joinpath(class_path, img_file)))
-                push!(Y, class_idx)
-            end
+data_path = "C:/Users/paulu/Documents/Julia_Ass_3/rice_image_dataset"
+classes = ["Arborio", "Basmati", "Ipsala", "Jasmine", "Karacadag"]
+
+function load_images(data_path, classes; image_size=(224, 224))
+    X, y = [], []
+    for (i, class) in enumerate(classes)
+        folder = joinpath(data_path, class)
+        for file in readdir(folder)
+            img = load(joinpath(folder, file))
+            img = imresize(img, image_size)
+            img_array = Float32.(channelview(img)) / 255.0  # Normalize to [0,1]
+            img_array = permutedims(img_array, (2, 3, 1))  # HxWxC
+            push!(X, img_array)
+            push!(y, i)
         end
     end
-    
-    # Convert to arrays
-    X = cat(X..., dims=4)  # H × W × C × N
-    Y = onehotbatch(Y, 1:num_classes)
-    
-    # Split into train and validation
-    idxs = shuffle(1:size(X, 4))
-    split_idx = floor(Int, (1-validation_split) * length(idxs))
-    
-    X_train = X[:,:,:,idxs[1:split_idx]]
-    Y_train = Y[:,idxs[1:split_idx]]
-    X_val = X[:,:,:,idxs[split_idx+1:end]]
-    Y_val = Y[:,idxs[split_idx+1:end]]
+    # Convert to array and normalize
+    X_array = cat(X..., dims=4)
+    X_array = (X_array .- mean(X_array)) ./ std(X_array)  # Standardize
+    return X_array, y
 end
 
-# ╔═╡ 5a4a48c6-fc9c-4168-885f-162e312d6850
-begin
-    # Loss function
-    loss(x, y) = crossentropy(model(x), y)
-    
-    # Optimizer with higher learning rate
-    opt = ADAM(0.0001)
-    state = Flux.setup(opt, model)
-    
-    # Accuracy function
-    accuracy(x, y) = mean(onecold(model(x)) .== onecold(y))
+# Load and prepare dataset
+X, y = load_images(data_path, classes)
+Y = onehotbatch(y, 1:length(classes))
+
+# Shuffle and split
+Random.seed!(1234)
+indices = shuffle(1:length(y))
+X, Y = X[:, :, :, indices], Y[:, indices]
+split_idx = Int(floor(0.8 * size(X, 4)))
+
+X_train, X_test = X[:, :, :, 1:split_idx], X[:, :, :, split_idx+1:end]
+Y_train, Y_test = Y[:, 1:split_idx], Y[:, split_idx+1:end]
+
+println("Training samples: ", size(X_train, 4))
+println("Testing samples: ", size(X_test, 4))
 end
 
-# ╔═╡ 47bad3a0-0ec1-4ae6-8391-53b1364e36ad
+
+# ╔═╡ 7d8e54ad-d687-48aa-ae18-08e5d0b80f6c
 begin
+model = Chain(
+    # Layer 1
+    Conv((11, 11), 3 => 96, stride=4, pad=2),
+    BatchNorm(96, relu),
+    MaxPool((3, 3), stride=2),
+    
+    # Layer 2
+    Conv((5, 5), 96 => 256, pad=2),
+    BatchNorm(256, relu),
+    MaxPool((3, 3), stride=2),
+    
+    # Layer 3
+    Conv((3, 3), 256 => 384, pad=1), relu,
+    
+    # Layer 4
+    Conv((3, 3), 384 => 384, pad=1), relu,
+    
+    # Layer 5
+    Conv((3, 3), 384 => 256, pad=1), relu,
+    MaxPool((3, 3), stride=2),
+    
+    # Classifier
+    flatten,
+    Dense(6*6*256, 4096), relu,
+    Dropout(0.5),
+    
+    Dense(4096, 4096), relu,
+    Dropout(0.5),
+    
+    Dense(4096, length(classes)),  # Final output layer
+    softmax
+)
+
+# Verify model structure
+println("Model architecture:")
+println(model)
+end
+
+# ╔═╡ c78fea8b-5b84-402d-ad74-d03082a00474
+begin
+# Hyperparameters
+batch_size = 32
+learning_rate = 0.001
 epochs = 10
-    train_losses = []
-    val_losses = []
-    accuracies = []
-    
-    # 3. Training loop
-    for epoch in 1:epochs
-        # Training phase
-        train_loss = 0.0f0
-        Flux.trainmode!(model)
-        for i in 1:batch_size:size(X_train, 4)
-            batch_range = i:min(i+batch_size-1, size(X_train, 4))
-            x = X_train[:,:,:,batch_range]
-            y = Y_train[:,batch_range]
-            
-            grads = gradient(model) do m
-                loss(x, y)
-            end
-            Flux.update!(state, model, grads[1])
-            train_loss += loss(x, y)
-        end
-        
-        # Validation phase
-        val_loss = 0.0f0
-        val_acc = 0.0f0
-        Flux.testmode!(model)
-        for i in 1:batch_size:size(X_val, 4)
-            batch_range = i:min(i+batch_size-1, size(X_val, 4))
-            x = X_val[:,:,:,batch_range]
-            y = Y_val[:,batch_range]
-            
-            val_loss += loss(x, y)
-            val_acc += accuracy(x, y)
-        end
-        
-        # Calculate averages
-        avg_train_loss = train_loss / ceil(Int, size(X_train, 4)/batch_size)
-        avg_val_loss = val_loss / ceil(Int, size(X_val, 4)/batch_size)
-        avg_val_acc = val_acc / ceil(Int, size(X_val, 4)/batch_size)
-        
-        push!(train_losses, avg_train_loss)
-        push!(val_losses, avg_val_loss)
-        push!(accuracies, avg_val_acc)
-        
-        # Print progress
-        println("Epoch $epoch: ",
-              "Train Loss = ", round(avg_train_loss, digits=4), ", ",
-              "Val Loss = ", round(avg_val_loss, digits=4), ", ",
-              "Accuracy = ", round(avg_val_acc*100, digits=2), "%")
-    end
+
+# Loss function
+function loss_fn(x, y)
+    ŷ = model(x)
+    return crossentropy(ŷ, y)
 end
 
-# ╔═╡ 5d561d41-fcd0-440f-970b-b5d839c4d368
-@show onecold(Y[:,1:5])
+# Optimizer setup - THIS IS THE CRUCIAL CHANGE
+opt = ADAM(learning_rate)
+optimizer_state = Flux.setup(opt, model)  # Initialize optimizer state
 
-# ╔═╡ 7abc9a73-b2fa-4501-a34b-baa51a87ee2a
-label_indices = onecold(Y)
+# Data loaders
+train_loader = DataLoader((X_train, Y_train), batchsize=batch_size, shuffle=true)
+test_loader = DataLoader((X_test, Y_test), batchsize=batch_size)
 
-# ╔═╡ 73604b51-6fd8-4b8a-a58e-0d875a7b4046
-counts = countmap(label_indices)
-
-# ╔═╡ 69a46a54-2df2-4f84-82ca-f264e33bfe20
-@show counts
-
-# ╔═╡ eed9fb17-8cf5-4eba-aa22-c51db8fea24b
-# Cell 8: Calculate metrics on validation set
-begin
-    # Collect all predictions and true labels
-    all_preds = []
-    all_labels = []
-    
-    for (x, y) in val_loader
-        preds = model(x)
-        push!(all_preds, preds)
-        push!(all_labels, y)
+# Training loop
+for epoch in 1:epochs
+    # Training phase
+    train_loss = 0.0
+    Flux.trainmode!(model)
+    for (x, y) in train_loader
+        loss, grads = Flux.withgradient(model) do m
+            loss_fn(x, y)
+        end
+        
+        # Update model parameters - NEW SYNTAX
+        Flux.update!(optimizer_state, model, grads[1])
+        
+        train_loss += loss
     end
     
-    # Concatenate all batches
-    y_pred = hcat(all_preds...)
-    y_true = hcat(all_labels...)
+    # Evaluation phase
+    test_loss = 0.0
+    Flux.testmode!(model)
+    for (x, y) in test_loader
+        test_loss += loss_fn(x, y)
+    end
     
-    # Convert to class indices
-    y_pred_classes = Flux.onecold(y_pred)
-    y_true_classes = Flux.onecold(y_true)
+    # Print progress
+    println("Epoch $epoch:")
+    println("  Train loss = $(train_loss / length(train_loader))")
+    println("  Test loss = $(test_loss / length(test_loader))")
+end
+end
+
+# ╔═╡ 266d3478-5abc-40d6-a922-df0d0628ba2d
+# Function to calculate all metrics without ROCAnalysis dependency
+function evaluate_model(model, X, Y, classes)
+    # Initialize variables
+    y_true = Int[]
+    y_pred = Int[]
+    y_scores = Matrix{Float32}(undef, length(classes), 0)
+    
+    Flux.testmode!(model)
+    for (x, y) in DataLoader((X, Y), batchsize=32)
+        # Get predictions
+        batch_scores = model(x)
+        batch_pred = onecold(batch_scores)
+        batch_true = onecold(y)
+        
+        # Accumulate results
+        y_true = vcat(y_true, batch_true)
+        y_pred = vcat(y_pred, batch_pred)
+        y_scores = hcat(y_scores, batch_scores)
+    end
     
     # Calculate metrics for each class
     metrics = Dict()
-    for (i, class_name) in enumerate(classes)
-        # Binary indicators for this class
-        true_pos = y_true_classes .== i
-        pred_pos = y_pred_classes .== i
+    roc_data = []
+    
+    for (i, class) in enumerate(classes)
+        # Binary labels for current class
+        true_binary = y_true .== i
+        pred_binary = y_pred .== i
+        scores = y_scores[i, :]
         
-        # True positives, false positives, etc.
-        TP = sum(true_pos .& pred_pos)
-        FP = sum(.!true_pos .& pred_pos)
-        TN = sum(.!true_pos .& .!pred_pos)
-        FN = sum(true_pos .& .!pred_pos)
+        # Calculate basic metrics
+        TP = sum((pred_binary .== true_binary) .& true_binary)
+        FP = sum((pred_binary .!= true_binary) .& pred_binary)
+        TN = sum((pred_binary .== true_binary) .& .!true_binary)
+        FN = sum((pred_binary .!= true_binary) .& .!pred_binary)
         
-        # Calculate metrics
         accuracy = (TP + TN) / (TP + FP + TN + FN)
-        precision = TP / (TP + FP)
-        recall = TP / (TP + FN)
-        sensitivity = recall  # Same as recall for binary classification
+        precision = TP / (TP + FP + eps())
+        recall = TP / (TP + FN + eps())
+        sensitivity = recall  # Same as recall
         
-        metrics[class_name] = Dict(
-            "accuracy" => accuracy,
-            "precision" => precision,
-            "recall" => recall,
-            "sensitivity" => sensitivity
+        # Manual ROC curve calculation
+        thresholds = sort(unique(scores), rev=true)
+        tpr = Float64[]
+        fpr = Float64[]
+        
+        for thresh in thresholds
+            pred_thresh = scores .>= thresh
+            TP_rate = sum(pred_thresh .& true_binary) / (sum(true_binary) + eps())
+            FP_rate = sum(pred_thresh .& .!true_binary) / (sum(.!true_binary) + eps())
+            push!(tpr, TP_rate)
+            push!(fpr, FP_rate)
+        end
+        
+        # Calculate AUC using trapezoidal rule
+        auc = 0.0
+        for j in 2:length(fpr)
+            auc += (fpr[j] - fpr[j-1]) * (tpr[j] + tpr[j-1]) / 2
+        end
+        
+        push!(roc_data, (fpr=fpr, tpr=tpr, class=class, auc=auc))
+        
+        metrics[class] = (
+            accuracy = round(accuracy, digits=4),
+            precision = round(precision, digits=4),
+            recall = round(recall, digits=4),
+            sensitivity = round(sensitivity, digits=4),
+            auc = round(auc, digits=4)
         )
     end
     
     # Calculate overall accuracy
-    overall_accuracy = mean(y_pred_classes .== y_true_classes)
+    overall_accuracy = mean(y_pred .== y_true)
     
-    # Display metrics
-    println("Overall Accuracy: $overall_accuracy")
-    for class_name in classes
-        println("\nMetrics for $class_name:")
-        println("Accuracy: $(metrics[class_name]["accuracy"])")
-        println("Precision: $(metrics[class_name]["precision"])")
-        println("Recall: $(metrics[class_name]["recall"])")
-        println("Sensitivity: $(metrics[class_name]["sensitivity"])")
-    end
+    return metrics, overall_accuracy, roc_data
 end
 
-# ╔═╡ 61bfdc7b-5602-4328-a9c6-4a119089af20
-# Cell 9: Plot ROC curves and calculate AUC
-begin
-    # Prepare data for ROC analysis
-    roc_data = []
-    auc_scores = []
-    
-    # Create a plot
-    p = plot(title="ROC Curves for Rice Classification", xlabel="False Positive Rate", ylabel="True Positive Rate", legend=:bottomright)
-    
-    for (i, class_name) in enumerate(classes)
-        # Get scores for this class (probability of being in this class)
-        scores = y_pred[i, :]
-        
-        # Binary labels for this class
-        labels = y_true_classes .== i
-        
-        # Calculate ROC curve
-        roc = ROCAnalysis.roc(labels, scores)
-        push!(roc_data, roc)
-        
-        # Calculate AUC
-        auc = ROCAnalysis.auc(roc)
-        push!(auc_scores, auc)
-        
-        # Plot ROC curve
-        plot!(p, roc, label="$class_name (AUC = $(round(auc, digits=3)))")
-    end
-    
-    # Add diagonal reference line
-    plot!(p, [0, 1], [0, 1], linestyle=:dash, color=:black, label="Random")
-    
-    # Display plot
-    display(p)
-    
-    # Print AUC scores
-    println("\nArea Under Curve (AUC) Scores:")
-    for (i, class_name) in enumerate(classes)
-        println("$class_name: $(auc_scores[i])")
-    end
+# ╔═╡ 24414691-a3e6-4c9b-9722-1eb83e6367e8
+metrics, overall_acc, roc_data = evaluate_model(model, X_test, Y_test, classes)
+
+# ╔═╡ 13347592-354d-4979-b204-2b0a0fc30aa2
+println("\nOverall Test Accuracy: $(round(overall_acc*100, digits=2))%")
+
+# ╔═╡ 53e49c05-df9f-454f-9bb4-4cf558ac1d24
+println("\nPer-Class Metrics:")
+
+# ╔═╡ 12682990-17b2-4397-9c6d-e7d49abef65a
+for (class, vals) in metrics
+    println("\nClass: $class")
+    println("  Accuracy: $(vals.accuracy)")
+    println("  Precision: $(vals.precision)")
+    println("  Recall: $(vals.recall)")
+    println("  Sensitivity: $(vals.sensitivity)")
+    println("  AUC: $(vals.auc)")
 end
 
-# ╔═╡ 174b5973-fa71-495e-bcd2-0b4fef242f6f
-# ╠═╡ disabled = true
-#=╠═╡
-begin
-    model = Chain(
-        # Conv1
-        Conv((11,11), 3=>96, relu, stride=4),
-        BatchNorm(96),
-        MaxPool((3,3), stride=2),
-        
-        # Conv2
-        Conv((5,5), 96=>256, relu, pad=2),
-        BatchNorm(256),
-        MaxPool((3,3), stride=2),
-        
-        # Conv3-5
-        Conv((3,3), 256=>384, relu, pad=1),
-        Conv((3,3), 384=>384, relu, pad=1),
-        Conv((3,3), 384=>256, relu, pad=1),
-        MaxPool((3,3), stride=2),
-        
-        # Classifier
-        flatten,
-        Dense(9216, 4096, relu),
-        Dropout(0.5),
-        Dense(4096, 4096, relu),
-        Dropout(0.5),
-        Dense(4096, num_classes),
-        softmax
-    )
-    
-    # Verify model
-    x_test = rand(Float32, 227, 227, 3, 1)
-    @assert size(model(x_test)) == (num_classes, 1) "Model architecture is incorrect"
-end
-  ╠═╡ =#
+# ╔═╡ 9463a008-0e6e-4167-8c38-a16a9a2bf4b6
+plt = plot(title="ROC Curves", xlabel="False Positive Rate", ylabel="True Positive Rate", 
+           legend=:bottomright, xlims=(0,1), ylims=(0,1))
 
-# ╔═╡ 8771c5fe-9eee-4e1c-a6c8-4ca72a3ab71d
-model = Chain(
-    Conv((3,3), 3=>16, relu, pad=1),
-    MaxPool((2,2)),
-    Conv((3,3), 16=>32, relu, pad=1),
-    MaxPool((2,2)),
-    flatten,
-    Dense(32*56*56, 128, relu),
-    Dense(128, num_classes),
-    softmax
-)
+# ╔═╡ 8f237c84-e539-4839-b81a-6d892062a86b
+for rd in roc_data
+    plot!(plt, rd.fpr, rd.tpr, label="$(rd.class) (AUC = $(round(rd.auc, digits=3))")
+end
+
+# ╔═╡ b6f106fa-04e3-40f8-bb01-0aac81d2b254
+plot!(plt, [0,1], [0,1], linestyle=:dash, color=:black, label="Random")
+
+# ╔═╡ 42ed173b-6993-4aa3-b4fe-a176cb1a2b71
+display(plt)
+
+# ╔═╡ 9755eded-26de-40fd-a140-8dd2b29462a4
+
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -2883,18 +2852,20 @@ version = "1.8.1+0"
 # ╠═b6757783-1b16-4878-8d3a-504a7d7e5e95
 # ╠═4ed28cd1-a869-4626-a5cc-2e6e8ab55e81
 # ╠═1bacbc71-5efa-4f2b-810c-4fb135976922
+# ╠═004bda84-19ad-4b72-963e-d787359ae74d
 # ╠═4d64f427-ba8d-4cb8-ab4e-ca23e7a2c752
 # ╠═c4ec3a76-b319-444d-afde-730417cc920a
-# ╠═b2b461c8-8bda-4c9a-a063-54935c7e0db9
-# ╠═8771c5fe-9eee-4e1c-a6c8-4ca72a3ab71d
-# ╠═174b5973-fa71-495e-bcd2-0b4fef242f6f
-# ╠═5a4a48c6-fc9c-4168-885f-162e312d6850
-# ╠═47bad3a0-0ec1-4ae6-8391-53b1364e36ad
-# ╠═5d561d41-fcd0-440f-970b-b5d839c4d368
-# ╠═7abc9a73-b2fa-4501-a34b-baa51a87ee2a
-# ╠═73604b51-6fd8-4b8a-a58e-0d875a7b4046
-# ╠═69a46a54-2df2-4f84-82ca-f264e33bfe20
-# ╠═eed9fb17-8cf5-4eba-aa22-c51db8fea24b
-# ╠═61bfdc7b-5602-4328-a9c6-4a119089af20
+# ╠═7d8e54ad-d687-48aa-ae18-08e5d0b80f6c
+# ╠═c78fea8b-5b84-402d-ad74-d03082a00474
+# ╠═266d3478-5abc-40d6-a922-df0d0628ba2d
+# ╠═24414691-a3e6-4c9b-9722-1eb83e6367e8
+# ╠═13347592-354d-4979-b204-2b0a0fc30aa2
+# ╠═53e49c05-df9f-454f-9bb4-4cf558ac1d24
+# ╠═12682990-17b2-4397-9c6d-e7d49abef65a
+# ╠═9463a008-0e6e-4167-8c38-a16a9a2bf4b6
+# ╠═8f237c84-e539-4839-b81a-6d892062a86b
+# ╠═b6f106fa-04e3-40f8-bb01-0aac81d2b254
+# ╠═42ed173b-6993-4aa3-b4fe-a176cb1a2b71
+# ╠═9755eded-26de-40fd-a140-8dd2b29462a4
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
